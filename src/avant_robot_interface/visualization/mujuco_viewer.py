@@ -6,7 +6,10 @@ Wraps MuJoCo viewer as optional component.
 import mujoco
 import mujoco.viewer
 from typing import Optional
-from .visualizer import Visualizer
+from pathlib import Path
+
+from avant_robot_interface.visualization.visualizer import Visualizer
+
 
 class MuJoCoVisualizer(Visualizer):
     """MuJoCo visualization implementation."""
@@ -62,13 +65,13 @@ class MuJoCoVisualizer(Visualizer):
 
 
 if __name__ == "__main__":
+    # export PYTHONPATH=/home/ben/avant_robot_interface/src:$PYTHONPATH
     import os
     import time
-    
-    # Path to the scene XML file
+
     xml_path = os.path.join(
         os.path.dirname(__file__), 
-        "../../../assets/franka_emika_panda/scene.xml"
+        "../../../assets/fr3/scene.xml"
     )
     xml_path = os.path.abspath(xml_path)
     
