@@ -49,7 +49,6 @@ from scipy.spatial.transform import Rotation
 import mink
 
 from crisp_py.robot import make_robot
-from crisp_py.utils import MuJoCoVisualizer
 
 from avant_robot_interface.core.contracts import (
     TimeStamp, RobotState, SE3, CartesianTarget,
@@ -58,6 +57,7 @@ from avant_robot_interface.core.contracts import (
 from avant_robot_interface.core.bridge import Bridge
 from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
+from avant_robot_interface.visualization.mujuco_viewer import MuJoCoVisualizer
 
 
 class MinkPlanner:
@@ -456,11 +456,29 @@ class FrankaMultiRateControlLoop:
         
         # 6. Setup visualization (optional)
         self.visualizer = None
+        self.mujoco_data = None
         if args.visualize:
-            print(f"Starting visualization (mode: {args.show_mode})...\n")
-            self.visualizer = MuJoCoVisualizer(self.model, q_padded, mode=args.show_mode)
-            self.visualizer.set_control_frequency(self.control_freq)
-            self.visualizer.start()
+            print(f"Starting visualization (mode: {args.show_mode})...")
+            print("  Note: Viewer updates asynchronously at display refresh rate (~60 Hz)")
+            print("  Rendering happens in separate thread - no control loop blocking\n")
+            
+            # Create MuJoCo data structure for visualization
+            self.mujoco_data = mujoco.MjData(self.model)
+            self.mujoco_data.qpos[:len(q_padded)] = q_padded
+            mujoco.mj_forward(self.model, self.mujoco_data)
+            
+            # Camera configuration for FR3
+            camera_config = {
+                'distance': 2.0,
+                'elevation': -20,
+                'azimuth': 135,
+                'lookat': [0.3, 0.0, 0.4]
+            }
+            
+            self.visualizer = MuJoCoVisualizer(self.model, self.mujoco_data, camera_config)
+            if not self.visualizer.initialize():
+                print("Warning: Failed to initialize visualizer, continuing without visualization")
+                self.visualizer = None
 
     def planner_tick(self):
         """Execute planner task - runs at planner frequency."""
@@ -481,35 +499,34 @@ class FrankaMultiRateControlLoop:
         return cmd
 
     def update_visualization(self, state: RobotState, cmd: JointCommand):
-        """Update visualization with current state and command."""
-        if self.visualizer is None:
-            return
-            
-        # Update commanded joints
-        if cmd.q_des is not None:
-            q_cmd_padded = np.zeros(self.model.nq)
-            q_cmd_padded[:len(cmd.q_des)] = cmd.q_des
-            self.visualizer.update_commanded(q_cmd_padded)
+        """
+        Update visualization with current state (non-blocking).
         
-        # Update actual joints
-        q_actual_padded = np.zeros(self.model.nq)
-        q_actual_padded[:len(state.q)] = state.q
-        self.visualizer.update_actual(q_actual_padded)
-
-        # Compute tracking errors for 'both' mode
-        if self.args.show_mode == 'both' and cmd.q_des is not None:
-            joint_error = np.linalg.norm(cmd.q_des - state.q)
-
-            # Compute task-space error
-            if self.controller.current_ref and self.controller.current_ref.mode == RefMode.TRACK:
-                ee_err = self.controller.end_effector_task.compute_error(self.controller.configuration)
-                pos_error = np.linalg.norm(ee_err[:3])
-                ori_error = np.linalg.norm(ee_err[3:])
-            else:
-                pos_error = 0.0
-                ori_error = 0.0
-
-            self.visualizer.set_error_metrics(joint_error, pos_error, ori_error)
+        This updates the joint positions in the MuJoCo data and calls viewer.sync(),
+        which is very fast (~microseconds). The actual rendering happens asynchronously
+        in a separate thread at display refresh rate (~60 Hz).
+        """
+        if self.visualizer is None or self.mujoco_data is None:
+            return
+        
+        # Decide which configuration to visualize based on show_mode
+        if self.args.show_mode == 'commanded' and cmd.q_des is not None:
+            # Show commanded/IK solution
+            q_viz = cmd.q_des
+        else:
+            # Show actual robot state (default for 'actual' and 'both' modes)
+            q_viz = state.q
+        
+        # Update MuJoCo data with joint positions
+        q_padded = np.zeros(self.model.nq)
+        q_padded[:len(q_viz)] = q_viz
+        self.mujoco_data.qpos[:] = q_padded
+        
+        # Forward kinematics
+        mujoco.mj_forward(self.model, self.mujoco_data)
+        
+        # Sync with viewer (non-blocking, ~1 microsecond)
+        self.visualizer.update()
 
     def report_mode_transition(self, elapsed: float):
         """Report controller mode transitions."""
@@ -589,7 +606,7 @@ class FrankaMultiRateControlLoop:
     def cleanup(self):
         """Cleanup resources."""
         if self.visualizer is not None:
-            self.visualizer.stop()
+            self.visualizer.shutdown()
         self.robot_interface.shutdown()
         print("Demo complete.")
 
