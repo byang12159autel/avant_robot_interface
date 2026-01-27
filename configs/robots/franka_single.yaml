@@ -20,7 +20,7 @@ controller:
   ee_lm_damping: 1.0
 
 rates:
-  planner_hz: 20.0
+  planner_hz: 50.0
   controller_hz: 100.0
 
 task:
