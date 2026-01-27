@@ -610,8 +610,11 @@ class FrankaMultiRateControlLoop:
 
 def main():
     """Main entry point for Franka robot control with Mink IK."""
+    _HOME_PATH = Path(__file__).parent.parent    
+    _CONFIG_PATH = _HOME_PATH / "configs" / "robots" / "franka_single.yaml"
+    
     # Load configuration
-    config = load_config("../configs/robots/franka_single.yaml")
+    config = load_config(_CONFIG_PATH)
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
