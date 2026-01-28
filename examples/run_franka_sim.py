@@ -57,6 +57,7 @@ from avant_robot_interface.core.contracts import (
 from avant_robot_interface.core.bridge import Bridge
 from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
+from avant_robot_interface.core.simple_control_loop import BaseMultiRateControlLoop
 from avant_robot_interface.visualization.mujoco.mujuco_viewer import MuJoCoVisualizer
 
 
@@ -344,15 +345,18 @@ class CrispRobotInterface:
         print("Robot shutdown complete.")
 
 
-class FrankaMultiRateControlLoop:
+class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
     """
     Multi-rate control loop for Franka robot with Mink IK.
+    
+    Extends BaseMultiRateControlLoop with ROS2 integration enabled.
     
     Integrates:
     - Planner task at lower frequency (e.g., 20 Hz)
     - Controller task at higher frequency (e.g., 1000 Hz)
-    - Visualization updates at controller frequency
-    - Proper decimation-based timing
+    - Visualization updates at medium frequency (e.g., 100 Hz)
+    - ROS2 pub/sub for external commands and state monitoring
+    - Proper decimation-based timing via base class
     """
 
     def __init__(self, args, config):
@@ -363,21 +367,36 @@ class FrankaMultiRateControlLoop:
             args: Command-line arguments
             config: Configuration object
         """
+        # Joint names for ROS2 integration
+        joint_names = [
+            'panda_joint1',
+            'panda_joint2',
+            'panda_joint3',
+            'panda_joint4',
+            'panda_joint5',
+            'panda_joint6',
+            'panda_joint7'
+        ]
+        
+        # Initialize base class with optional ROS2
+        super().__init__(
+            base_frequency_hz=args.control_freq,
+            task1_frequency_hz=args.plan_freq,       # Planner
+            task2_frequency_hz=args.control_freq,    # Controller
+            task3_frequency_hz=args.ros2_freq,       # Visualization + ROS2 publishing
+            enable_ros2=args.enable_ros2,            # Optional ROS2 integration
+            joint_names=joint_names
+        )
+        
         self.args = args
         self.config = config
         
         # Timing configuration
         self.plan_freq = args.plan_freq
         self.control_freq = args.control_freq
-        self.base_frequency_hz = self.control_freq  # Base rate = controller rate
-        self.base_dt = 1.0 / self.base_frequency_hz
         self.control_dt = 1.0 / self.control_freq
         
-        # Calculate decimation factors
-        self.planner_decimation = int(self.control_freq / self.plan_freq)
-        
-        # Counters
-        self.iteration_counter = 0
+        # Counters (additional to base class)
         self.planner_counter = 0
         self.controller_counter = 0
         
@@ -388,8 +407,10 @@ class FrankaMultiRateControlLoop:
         print("="*60)
         print("Mink IK + robot_task_interface + crisp_py Demo")
         print("="*60)
-        print(f"Planner frequency: {self.plan_freq} Hz (every {self.planner_decimation} iterations)")
-        print(f"Controller frequency: {self.control_freq} Hz (every iteration)")
+        print(f"Planner frequency: {self.plan_freq} Hz")
+        print(f"Controller frequency: {self.control_freq} Hz")
+        print(f"Visualization/ROS2 frequency: {args.ros2_freq} Hz")
+        print(f"ROS2 enabled: {self.enable_ros2}")
         if args.planner_alive:
             print(f"Planner dropout after: {args.planner_alive}s")
         print("="*60)
@@ -480,24 +501,99 @@ class FrankaMultiRateControlLoop:
                 print("Warning: Failed to initialize visualizer, continuing without visualization")
                 self.visualizer = None
 
-    def planner_tick(self):
-        """Execute planner task - runs at planner frequency."""
+    # ═══════════════════════════════════════════════════════════
+    # BaseMultiRateControlLoop abstract methods
+    # ═══════════════════════════════════════════════════════════
+    
+    def task1_fast(self):
+        """
+        Task 1: Planner - runs at planner frequency (e.g., 20 Hz).
+        
+        This task generates task-space references and checks for ROS2 commands.
+        """
+        # ═══════════════════════════════════════════════
+        # 1. Generate planner reference
+        # ═══════════════════════════════════════════════
         ref = self.planner.update(self.initial_state)  # state not used by this planner
         if ref is not None:
             self.bridge.planner_tick(ref)
+        
+        # ═══════════════════════════════════════════════
+        # 2. Check for ROS2 joint commands (optional)
+        # ═══════════════════════════════════════════════
+        if self.enable_ros2 and self.ros2_node is not None:
+            ros2_cmd = self.ros2_node.get_joint_command(max_age_s=1.0)
+            if ros2_cmd is not None:
+                # Could override planner with ROS2 command if desired
+                # For now, just log it
+                pass
+        
         self.planner_counter += 1
-
-    def controller_tick(self, state: RobotState) -> JointCommand:
-        """Execute controller task - runs at controller frequency."""
-        # Controller tick via Bridge
+        return ref
+    
+    def task2_medium(self):
+        """
+        Task 2: Controller - runs at controller frequency (e.g., 1000 Hz).
+        
+        This task reads robot state, computes control commands, and sends them.
+        """
+        # ═══════════════════════════════════════════════
+        # 1. Get current robot state
+        # ═══════════════════════════════════════════════
+        state = self.robot_interface.get_state()
+        
+        # ═══════════════════════════════════════════════
+        # 2. Execute controller via Bridge
+        # ═══════════════════════════════════════════════
         cmd = self.bridge.control_tick(state)
         
-        # Send command to robot
+        # ═══════════════════════════════════════════════
+        # 3. Send command to robot
+        # ═══════════════════════════════════════════════
         self.robot_interface.send_command(cmd)
         
+        # ═══════════════════════════════════════════════
+        # 4. Report mode transitions (periodically)
+        # ═══════════════════════════════════════════════
+        if self.controller_counter % 1000 == 0:  # Every second at 1000Hz
+            self.report_mode_transition()
+        
         self.controller_counter += 1
+        
+        # Store for visualization
+        self.latest_state = state
+        self.latest_cmd = cmd
+        
         return cmd
-
+    
+    def task3_slow(self):
+        """
+        Task 3: Visualization and ROS2 publishing - runs at 100 Hz.
+        
+        This task updates visualization and publishes robot state to ROS2.
+        """
+        # ═══════════════════════════════════════════════
+        # 1. Update visualization
+        # ═══════════════════════════════════════════════
+        if hasattr(self, 'latest_state') and hasattr(self, 'latest_cmd'):
+            self.update_visualization(self.latest_state, self.latest_cmd)
+        
+        # ═══════════════════════════════════════════════
+        # 2. Publish robot state to ROS2
+        # ═══════════════════════════════════════════════
+        if self.enable_ros2 and self.ros2_node is not None and hasattr(self, 'latest_state'):
+            self.ros2_node.publish_robot_state(
+                positions=self.latest_state.q[:7],
+                velocities=self.latest_state.dq[:7] if len(self.latest_state.dq) >= 7 else None,
+                efforts=None
+            )
+        
+        return None
+    
+    # ═══════════════════════════════════════════════════════════
+    # Helper methods
+    # ═══════════════════════════════════════════════════════════
+    
     def update_visualization(self, state: RobotState, cmd: JointCommand):
         """
         Update visualization with current state (non-blocking).
@@ -528,10 +624,11 @@ class FrankaMultiRateControlLoop:
         # Sync with viewer (non-blocking, ~1 microsecond)
         self.visualizer.update()
 
-    def report_mode_transition(self, elapsed: float):
+    def report_mode_transition(self):
         """Report controller mode transitions."""
         current_mode = self.controller.current_ref.mode if self.controller.current_ref else RefMode.HOLD
         if current_mode != self.last_mode:
+            elapsed = time.time() - self.t_start if self.t_start else 0
             mode_info = "HOLD (stale/no ref)" if current_mode == RefMode.HOLD else "TRACK"
             print(f"[t={elapsed:5.2f}s] Controller mode -> {mode_info}")
             self.last_mode = current_mode
@@ -547,14 +644,23 @@ class FrankaMultiRateControlLoop:
         print("Press Ctrl+C or close viewer window to stop\n")
         
         self.t_start = time.time()
-        self.iteration_counter = 0
+        
+        # Store latest state/cmd for visualization
+        self.latest_state = None
+        self.latest_cmd = None
 
         try:
+            # Use base class run method with custom termination check
+            original_duration = duration_s if duration_s else 9999999.0
+            
+            # Override to add visualizer check
+            start_time = time.time()
+            
             while True:
                 loop_start = time.time()
 
                 # Check if duration exceeded
-                elapsed = loop_start - self.t_start
+                elapsed = loop_start - start_time
                 if duration_s is not None and elapsed >= duration_s:
                     break
 
@@ -564,27 +670,25 @@ class FrankaMultiRateControlLoop:
                     break
 
                 # ═══════════════════════════════════════════════
-                # TASK 1: Planner (low frequency, e.g., 20 Hz)
+                # TASK 1: Planner (decimated)
                 # ═══════════════════════════════════════════════
-                if self.iteration_counter % self.planner_decimation == 0:
-                    self.planner_tick()
+                if self.iteration_counter % self.task1_decimation == 0:
+                    self.task1_fast()
+                    self.task1_counter += 1
 
                 # ═══════════════════════════════════════════════
-                # TASK 2: Controller (high frequency, e.g., 1000 Hz)
+                # TASK 2: Controller (decimated)
                 # ═══════════════════════════════════════════════
-                # Get current robot state
-                state = self.robot_interface.get_state()
-                
-                # Execute controller
-                cmd = self.controller_tick(state)
+                if self.iteration_counter % self.task2_decimation == 0:
+                    self.task2_medium()
+                    self.task2_counter += 1
 
                 # ═══════════════════════════════════════════════
-                # TASK 3: Visualization (controller frequency)
+                # TASK 3: Visualization + ROS2 (decimated)
                 # ═══════════════════════════════════════════════
-                self.update_visualization(state, cmd)
-
-                # Report mode transitions
-                self.report_mode_transition(elapsed)
+                if self.iteration_counter % self.task3_decimation == 0:
+                    self.task3_slow()
+                    self.task3_counter += 1
 
                 # Increment counter
                 self.iteration_counter += 1
@@ -599,18 +703,33 @@ class FrankaMultiRateControlLoop:
             print("\nKeyboard interrupt received...")
         finally:
             # Cleanup
-            elapsed = time.time() - self.t_start
+            elapsed = time.time() - start_time
             self.cleanup()
-            self.print_statistics(elapsed)
+            self.print_final_statistics(elapsed)
+
+    def shutdown(self):
+        """Shutdown resources (called by base class)."""
+        # Call base class shutdown (handles ROS2)
+        super().shutdown()
+        
+        # Clean up Franka-specific resources
+        if self.visualizer is not None:
+            self.visualizer.shutdown()
+        self.robot_interface.shutdown()
 
     def cleanup(self):
         """Cleanup resources."""
         if self.visualizer is not None:
             self.visualizer.shutdown()
         self.robot_interface.shutdown()
+        
+        # Also shutdown ROS2
+        if self.enable_ros2 and self.ros2_node is not None:
+            self.ros2_node.shutdown()
+        
         print("Demo complete.")
 
-    def print_statistics(self, elapsed: float):
+    def print_final_statistics(self, elapsed: float):
         """Print execution statistics."""
         print("\n" + "="*60)
         print("Execution Statistics:")
@@ -622,6 +741,10 @@ class FrankaMultiRateControlLoop:
               f"(expected: ~{int(self.plan_freq * elapsed)})")
         print(f"  Controller calls: {self.controller_counter} "
               f"(expected: ~{int(self.control_freq * elapsed)})")
+        print(f"  Visualization calls: {self.task3_counter} "
+              f"(expected: ~{int(self.args.ros2_freq * elapsed)})")
+        if self.enable_ros2:
+            print(f"  ROS2: Enabled - published {self.task3_counter} state messages")
         print("="*60)
 
 
@@ -672,6 +795,17 @@ def main():
         type=float,
         default=None,
         help='Duration to run in seconds (default: run until interrupted)'
+    )
+    parser.add_argument(
+        '--ros2-freq',
+        type=float,
+        default=50.0,
+        help='ROS2 publishing and visualization frequency in Hz (default: 50.0)'
+    )
+    parser.add_argument(
+        '--enable-ros2',
+        action='store_true',
+        help='Enable ROS2 integration for pub/sub (default: disabled to avoid timing jitter)'
     )
     args = parser.parse_args()
     
