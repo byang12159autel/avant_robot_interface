@@ -378,13 +378,14 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
             'panda_joint7'
         ]
         
-        # Initialize base class with optional ROS2
+        # Initialize base class with optional inline ROS2 (no jitter!)
         super().__init__(
             base_frequency_hz=args.control_freq,
             task1_frequency_hz=args.plan_freq,       # Planner
             task2_frequency_hz=args.control_freq,    # Controller
             task3_frequency_hz=args.ros2_freq,       # Visualization + ROS2 publishing
             enable_ros2=args.enable_ros2,            # Optional ROS2 integration
+            inline_ros2=True,                        # Use inline mode to eliminate jitter
             joint_names=joint_names
         )
         
@@ -521,8 +522,8 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
         # ═══════════════════════════════════════════════
         # 2. Check for ROS2 joint commands (optional)
         # ═══════════════════════════════════════════════
-        if self.enable_ros2 and self.ros2_node is not None:
-            ros2_cmd = self.ros2_node.get_joint_command(max_age_s=1.0)
+        if self.enable_ros2:
+            ros2_cmd = self.get_ros2_joint_command(max_age_s=1.0)
             if ros2_cmd is not None:
                 # Could override planner with ROS2 command if desired
                 # For now, just log it
@@ -571,18 +572,25 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
         Task 3: Visualization and ROS2 publishing - runs at 100 Hz.
         
         This task updates visualization and publishes robot state to ROS2.
+        In inline ROS2 mode, also processes ROS2 callbacks here.
         """
         # ═══════════════════════════════════════════════
-        # 1. Update visualization
+        # 1. Process ROS2 callbacks (inline mode - no thread!)
+        # ═══════════════════════════════════════════════
+        if self.enable_ros2 and self.inline_ros2:
+            self.spin_ros2_once(timeout_sec=0.0)  # Non-blocking
+        
+        # ═══════════════════════════════════════════════
+        # 2. Update visualization
         # ═══════════════════════════════════════════════
         if hasattr(self, 'latest_state') and hasattr(self, 'latest_cmd'):
             self.update_visualization(self.latest_state, self.latest_cmd)
         
         # ═══════════════════════════════════════════════
-        # 2. Publish robot state to ROS2
+        # 3. Publish robot state to ROS2
         # ═══════════════════════════════════════════════
-        if self.enable_ros2 and self.ros2_node is not None and hasattr(self, 'latest_state'):
-            self.ros2_node.publish_robot_state(
+        if self.enable_ros2 and hasattr(self, 'latest_state'):
+            self.publish_ros2_robot_state(
                 positions=self.latest_state.q[:7],
                 velocities=self.latest_state.dq[:7] if len(self.latest_state.dq) >= 7 else None,
                 efforts=None
@@ -709,7 +717,7 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
 
     def shutdown(self):
         """Shutdown resources (called by base class)."""
-        # Call base class shutdown (handles ROS2)
+        # Call base class shutdown (handles ROS2 in both modes)
         super().shutdown()
         
         # Clean up Franka-specific resources
@@ -723,9 +731,9 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
             self.visualizer.shutdown()
         self.robot_interface.shutdown()
         
-        # Also shutdown ROS2
-        if self.enable_ros2 and self.ros2_node is not None:
-            self.ros2_node.shutdown()
+        # Base class handles ROS2 shutdown
+        if self.enable_ros2:
+            super().shutdown()
         
         print("Demo complete.")
 
@@ -741,8 +749,8 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
               f"(expected: ~{int(self.plan_freq * elapsed)})")
         print(f"  Controller calls: {self.controller_counter} "
               f"(expected: ~{int(self.control_freq * elapsed)})")
-        print(f"  Visualization calls: {self.task3_counter} "
-              f"(expected: ~{int(self.args.ros2_freq * elapsed)})")
+        print(f"  Visualization/ROS2 calls: {self.task3_counter} "
+              f"(expected: ~{int(self.task3_frequency * elapsed)})")
         if self.enable_ros2:
             print(f"  ROS2: Enabled - published {self.task3_counter} state messages")
         print("="*60)

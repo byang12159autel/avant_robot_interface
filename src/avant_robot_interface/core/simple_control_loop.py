@@ -36,7 +36,8 @@ class BaseMultiRateControlLoop(ABC):
                  task1_frequency_hz: float = 1000.0,
                  task2_frequency_hz: float = 500.0,
                  task3_frequency_hz: float = 100.0,
-                 enable_ros2: bool = False, 
+                 enable_ros2: bool = False,
+                 inline_ros2: bool = False,
                  joint_names: Optional[list] = None):
         """
         Initialize the multi-rate control loop.
@@ -47,6 +48,7 @@ class BaseMultiRateControlLoop(ABC):
             task2_frequency_hz: Frequency for task 2 (medium)
             task3_frequency_hz: Frequency for task 3 (slow)
             enable_ros2: Enable ROS2 integration
+            inline_ros2: Use inline ROS2 mode (no separate thread, eliminates jitter)
             joint_names: List of joint names for ROS2 publishing
         """
         # Timing configuration
@@ -71,30 +73,92 @@ class BaseMultiRateControlLoop(ABC):
         
         # ROS2 integration
         self.enable_ros2 = enable_ros2
+        self.inline_ros2 = inline_ros2
         self.ros2_node: Optional['ROS2Node'] = None
+        self.ros2_rclpy_node = None  # For inline mode
+        self.ros2_executor = None     # For inline mode
+        self.ros2_subscribers = None  # For inline mode
+        self.ros2_publishers = None   # For inline mode
         self.joint_names = joint_names
         
         # Initialize ROS2 if requested
         if enable_ros2:
-            self._initialize_ros2()
+            if inline_ros2:
+                self._initialize_inline_ros2()
+            else:
+                self._initialize_ros2()
 
         self._print_configuration()
 
     def _initialize_ros2(self):
-        """Initialize ROS2 node if available."""
+        """Initialize ROS2 node with separate thread (original mode)."""
         try:
             from ..ros2 import create_ros2_node
             self.ros2_node = create_ros2_node(
                 node_name='simple_control_loop',
                 joint_names=self.joint_names
             )
-            print(f"✓ ROS2 integration enabled")
+            print(f"✓ ROS2 integration enabled (separate thread mode)")
         except ImportError as e:
             print(f"⚠️ ROS2 not available: {e}")
             self.enable_ros2 = False
         except Exception as e:
             print(f"✗ Failed to initialize ROS2: {e}")
             self.enable_ros2 = False
+
+    def _initialize_inline_ros2(self):
+        """Initialize ROS2 node in inline mode (no separate thread)."""
+        try:
+            import rclpy
+            from rclpy.node import Node
+            from rclpy.executors import SingleThreadedExecutor
+            from ..ros2.subscribers import create_subscribers
+            from ..ros2.publishers import create_publishers
+            from ..ros2.handlers import JointCommandHandler, RobotStatePublisher
+            
+            # Initialize rclpy if not already done
+            if not rclpy.ok():
+                rclpy.init()
+            
+            # Create ROS2 node
+            self.ros2_rclpy_node = Node('inline_control_loop')
+            
+            # Create thread-safe handlers
+            self.ros2_handlers = {
+                'joint_cmd': JointCommandHandler(),
+                'robot_state': RobotStatePublisher(),
+            }
+            
+            # Create subscribers
+            self.ros2_subscribers = create_subscribers(
+                self.ros2_rclpy_node, 
+                self.ros2_handlers
+            )
+            
+            # Create publishers
+            config = {'joint_names': self.joint_names} if self.joint_names else {}
+            self.ros2_publishers = create_publishers(
+                self.ros2_rclpy_node,
+                self.ros2_handlers,
+                config
+            )
+            
+            # Create executor (but don't start spinning in separate thread)
+            self.ros2_executor = SingleThreadedExecutor()
+            self.ros2_executor.add_node(self.ros2_rclpy_node)
+            
+            print(f"✓ ROS2 integration enabled (inline mode - no jitter)")
+            
+        except ImportError as e:
+            print(f"⚠️ ROS2 not available: {e}")
+            self.enable_ros2 = False
+            self.inline_ros2 = False
+        except Exception as e:
+            print(f"✗ Failed to initialize inline ROS2: {e}")
+            import traceback
+            traceback.print_exc()
+            self.enable_ros2 = False
+            self.inline_ros2 = False
 
     def _print_configuration(self):
         """Print control loop configuration."""
@@ -104,6 +168,8 @@ class BaseMultiRateControlLoop(ABC):
         print(f"  Task 2: {self.task2_frequency} Hz (every {self.task2_decimation} iterations)")
         print(f"  Task 3: {self.task3_frequency} Hz (every {self.task3_decimation} iterations)")
         print(f"  ROS2 enabled: {self.enable_ros2}")
+        if self.enable_ros2:
+            print(f"  ROS2 mode: {'Inline (no jitter)' if self.inline_ros2 else 'Separate thread'}")
         print()
 
     @abstractmethod
@@ -209,8 +275,66 @@ class BaseMultiRateControlLoop(ABC):
 
     def shutdown(self):
         """Shutdown resources (including ROS2). Can be overridden by subclasses."""
-        if self.enable_ros2 and self.ros2_node is not None:
-            self.ros2_node.shutdown()
+        if self.enable_ros2:
+            if self.inline_ros2:
+                # Cleanup inline ROS2
+                if self.ros2_executor is not None:
+                    self.ros2_executor.shutdown()
+                if self.ros2_rclpy_node is not None:
+                    self.ros2_rclpy_node.destroy_node()
+            elif self.ros2_node is not None:
+                # Cleanup threaded ROS2
+                self.ros2_node.shutdown()
+    
+    def get_ros2_joint_command(self, max_age_s: float = 1.0):
+        """
+        Get latest joint command from ROS2 (works in both modes).
+        
+        Args:
+            max_age_s: Maximum age of command to accept
+            
+        Returns:
+            Joint positions as numpy array, or None
+        """
+        if not self.enable_ros2:
+            return None
+        
+        if self.inline_ros2:
+            return self.ros2_handlers['joint_cmd'].get_joint_positions(max_age_s)
+        elif self.ros2_node is not None:
+            return self.ros2_node.get_joint_command(max_age_s)
+        
+        return None
+    
+    def publish_ros2_robot_state(self, positions, velocities=None, efforts=None):
+        """
+        Publish robot state to ROS2 (works in both modes).
+        
+        Args:
+            positions: Joint positions
+            velocities: Joint velocities (optional)
+            efforts: Joint efforts/torques (optional)
+        """
+        if not self.enable_ros2:
+            return
+        
+        if self.inline_ros2:
+            self.ros2_handlers['robot_state'].update_state(positions, velocities, efforts)
+        elif self.ros2_node is not None:
+            self.ros2_node.publish_robot_state(positions, velocities, efforts)
+    
+    def spin_ros2_once(self, timeout_sec: float = 0.0):
+        """
+        Process ROS2 callbacks once (inline mode only).
+        
+        Call this in task3_slow() to process ROS2 pub/sub at lower rate.
+        This eliminates thread contention and jitter.
+        
+        Args:
+            timeout_sec: Max time to wait for callbacks (0 = non-blocking)
+        """
+        if self.inline_ros2 and self.ros2_executor is not None:
+            self.ros2_executor.spin_once(timeout_sec=timeout_sec)
 
     def print_statistics(self, elapsed: float):
         """Print execution statistics."""
