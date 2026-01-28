@@ -13,10 +13,10 @@ import numpy as np
 from typing import Optional
 from pathlib import Path
 
-from avant_robot_interface.visualization.visualizer import Visualizer
+from avant_robot_interface.visualization.visualizer import BaseVisualizer
 
 
-class MuJoCoVisualizer(Visualizer):
+class MuJoCoVisualizer(BaseVisualizer):
     """
     MuJoCo visualization implementation with asynchronous rendering.
     
