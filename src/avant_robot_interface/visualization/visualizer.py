@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 from typing import Optional
 
-class Visualizer(ABC):
+class BaseVisualizer(ABC):
     """Abstract base class for visualizers."""
     
     @abstractmethod
