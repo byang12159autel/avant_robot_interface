@@ -57,7 +57,7 @@ from avant_robot_interface.core.contracts import (
 from avant_robot_interface.core.bridge import Bridge
 from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
-from avant_robot_interface.visualization.mujuco_viewer import MuJoCoVisualizer
+from avant_robot_interface.visualization.mujoco.mujuco_viewer import MuJoCoVisualizer
 
 
 class MinkPlanner:
