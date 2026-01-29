@@ -91,8 +91,8 @@ class KeyboardEETeleop(Node):
         Initialize the keyboard teleop node.
 
         Args:
-            initial_position: Initial XYZ position (default: [0.5, 0.0, 0.4])
-            initial_orientation: Initial quaternion xyzw (default: [0, 0, 0, 1])
+            initial_position: Initial XYZ position 
+            initial_orientation: Initial quaternion xyzw 
             translation_step: Translation step size in meters
             rotation_step: Rotation step size in radians
             publish_rate: Publishing rate in Hz
@@ -100,8 +100,8 @@ class KeyboardEETeleop(Node):
         super().__init__('keyboard_ee_teleop')
 
         # Initialize pose
-        self.position = initial_position if initial_position is not None else np.array([0.5, 0.0, 0.4])
-        self.orientation = initial_orientation if initial_orientation is not None else np.array([0.0, 0.0, 0.0, 1.0])
+        self.position = initial_position if initial_position is not None else np.array([0.3, 0.0, 0.48])
+        self.orientation = initial_orientation if initial_orientation is not None else np.array([1.0, 0.0, 0.0, 0.0])
         
         # Store initial for reset
         self.initial_position = self.position.copy()
