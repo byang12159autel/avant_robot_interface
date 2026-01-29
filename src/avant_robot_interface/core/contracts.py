@@ -35,9 +35,27 @@ class SE3:
 
 @dataclass(frozen=True)
 class RobotState:
+    """Complete robot state with joint and task space information.
+    
+    All fields except stamp, q, and dq are optional for backward compatibility.
+    This allows existing code to continue working while enabling comprehensive
+    state representation for dynamics-based and force control applications.
+    """
     stamp: TimeStamp
-    q: np.ndarray   # (n,)
-    dq: np.ndarray  # (n,)
+    
+    # Joint space (required)
+    q: np.ndarray   # (n,) Joint positions [rad]
+    dq: np.ndarray  # (n,) Joint velocities [rad/s]
+    
+    # Joint space (optional)
+    tau: Optional[np.ndarray] = None   # (n,) Joint torques/efforts [Nm]
+    qdd: Optional[np.ndarray] = None   # (n,) Joint accelerations [rad/s²]
+    
+    # Task space (optional) - end-effector state
+    ts_pose: Optional[SE3] = None                  # End-effector pose (position + orientation)
+    ts_vel: Optional[np.ndarray] = None            # (6,) Spatial velocity [wx, wy, wz, vx, vy, vz]
+    ts_acc: Optional[np.ndarray] = None            # (6,) Task space acceleration
+    ts_wrench: Optional[np.ndarray] = None         # (6,) Wrench [fx, fy, fz, tx, ty, tz]
 
 @dataclass(frozen=True)
 class CartesianTarget:
