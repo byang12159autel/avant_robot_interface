@@ -114,7 +114,7 @@ class BaseMultiRateControlLoop(ABC):
             from rclpy.executors import SingleThreadedExecutor
             from ..ros2.subscribers import create_subscribers
             from ..ros2.publishers import create_publishers
-            from ..ros2.handlers import JointCommandHandler, RobotStatePublisher
+            from ..ros2.handlers import JointCommandHandler, RobotStatePublisher, EEPoseCommandHandler
             
             # Initialize rclpy if not already done
             if not rclpy.ok():
@@ -127,6 +127,7 @@ class BaseMultiRateControlLoop(ABC):
             self.ros2_handlers = {
                 'joint_cmd': JointCommandHandler(),
                 'robot_state': RobotStatePublisher(),
+                'ee_pose': EEPoseCommandHandler(),
             }
             
             # Create subscribers
@@ -304,6 +305,26 @@ class BaseMultiRateControlLoop(ABC):
         elif self.ros2_node is not None:
             return self.ros2_node.get_joint_command(max_age_s)
         
+        return None
+    
+    def get_ros2_ee_command(self, max_age_s: float = 1.0):
+        """
+        Get latest end-effector pose command from ROS2 (inline mode only).
+        
+        Args:
+            max_age_s: Maximum age of command to accept
+            
+        Returns:
+            Dictionary with 'position' (xyz) and 'orientation' (xyzw quaternion),
+            or None if no valid message or ROS2 not enabled
+        """
+        if not self.enable_ros2:
+            return None
+        
+        if self.inline_ros2:
+            return self.ros2_handlers['ee_pose'].get_ee_pose(max_age_s)
+        
+        # Separate thread mode not yet implemented for EE commands
         return None
     
     def publish_ros2_robot_state(self, positions, velocities=None, efforts=None):

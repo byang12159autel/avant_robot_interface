@@ -9,8 +9,9 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import PoseStamped, Pose
 
-from .handlers import JointCommandHandler
+from .handlers import JointCommandHandler, EEPoseCommandHandler
 
 
 class JointCommandSubscriber:
@@ -66,6 +67,59 @@ class JointCommandSubscriber:
         # self.node.get_logger().info(f"Received command on {self.topic}")
 
 
+class EEPoseSubscriber:
+    """
+    Subscribes to end-effector pose command topics.
+    
+    Supports multiple message types:
+    - geometry_msgs/PoseStamped
+    - geometry_msgs/Pose
+    """
+    
+    def __init__(self, node: Node, handler: EEPoseCommandHandler, 
+                 topic: str = '/ee_command', 
+                 msg_type: str = 'PoseStamped'):
+        """
+        Args:
+            node: ROS2 node
+            handler: Thread-safe handler to store received messages
+            topic: Topic name to subscribe to
+            msg_type: Message type ('PoseStamped' or 'Pose')
+        """
+        self.node = node
+        self.handler = handler
+        self.topic = topic
+        
+        # Create subscriber based on message type
+        if msg_type == 'PoseStamped':
+            self.subscriber = node.create_subscription(
+                PoseStamped,
+                topic,
+                self._callback,
+                10  # QoS history depth
+            )
+        elif msg_type == 'Pose':
+            self.subscriber = node.create_subscription(
+                Pose,
+                topic,
+                self._callback,
+                10
+            )
+        else:
+            raise ValueError(f"Unsupported message type: {msg_type}")
+        
+        node.get_logger().info(f"Created EE pose subscriber: {topic} ({msg_type})")
+    
+    def _callback(self, msg):
+        """
+        Callback for received messages.
+        Stores message in thread-safe handler.
+        """
+        self.handler.update(msg)
+        # Optional: log received commands
+        # self.node.get_logger().info(f"Received EE command on {self.topic}")
+
+
 def create_subscribers(node: Node, handlers: dict) -> dict:
     """
     Factory function to create all subscribers.
@@ -86,6 +140,15 @@ def create_subscribers(node: Node, handlers: dict) -> dict:
             handler=handlers['joint_cmd'],
             topic='/joint_command',
             msg_type='JointState'
+        )
+    
+    # Create end-effector pose subscriber if handler exists
+    if 'ee_pose' in handlers:
+        subscribers['ee_pose'] = EEPoseSubscriber(
+            node=node,
+            handler=handlers['ee_pose'],
+            topic='/ee_command',
+            msg_type='PoseStamped'
         )
     
     # Add more subscribers here as needed

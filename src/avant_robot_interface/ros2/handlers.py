@@ -136,3 +136,100 @@ class RobotStatePublisher:
         """Check if new data is available for publishing."""
         with self._lock:
             return self._new_data_available
+
+
+class EEPoseCommandHandler:
+    """
+    Thread-safe handler for receiving end-effector pose commands from ROS2.
+    
+    Used by control loop to get latest EE pose command from ROS2 subscriber.
+    """
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._latest_msg: Optional[Any] = None
+        self._timestamp: float = 0.0
+    
+    def update(self, msg: Any) -> None:
+        """
+        Called by ROS2 subscriber callback to store new message.
+        
+        Args:
+            msg: ROS2 message (e.g., geometry_msgs.msg.PoseStamped)
+        """
+        with self._lock:
+            self._latest_msg = msg
+            self._timestamp = time.time()
+    
+    def get_latest(self, max_age_s: float = 1.0) -> Optional[Any]:
+        """
+        Called by control loop to get latest message.
+        
+        Args:
+            max_age_s: Maximum age of message to return (seconds)
+            
+        Returns:
+            Latest message if available and not stale, None otherwise
+        """
+        with self._lock:
+            if self._latest_msg is None:
+                return None
+            
+            age = time.time() - self._timestamp
+            if age > max_age_s:
+                # Message is stale
+                return None
+            
+            return self._latest_msg
+    
+    def get_ee_pose(self, max_age_s: float = 1.0) -> Optional[dict]:
+        """
+        Convenience method to extract end-effector pose as dictionary.
+        
+        Returns:
+            Dictionary with 'position' (xyz) and 'orientation' (xyzw quaternion),
+            or None if no valid message
+        """
+        msg = self.get_latest(max_age_s)
+        if msg is None:
+            return None
+        
+        # Handle PoseStamped message
+        if hasattr(msg, 'pose'):
+            pose = msg.pose
+            position = np.array([
+                pose.position.x,
+                pose.position.y,
+                pose.position.z
+            ])
+            orientation = np.array([
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w
+            ])
+            return {
+                'position': position,
+                'orientation': orientation,
+                'frame_id': msg.header.frame_id if hasattr(msg, 'header') else 'world'
+            }
+        # Handle Pose message (without header)
+        elif hasattr(msg, 'position') and hasattr(msg, 'orientation'):
+            position = np.array([
+                msg.position.x,
+                msg.position.y,
+                msg.position.z
+            ])
+            orientation = np.array([
+                msg.orientation.x,
+                msg.orientation.y,
+                msg.orientation.z,
+                msg.orientation.w
+            ])
+            return {
+                'position': position,
+                'orientation': orientation,
+                'frame_id': 'world'
+            }
+        else:
+            return None
