@@ -4,6 +4,18 @@ from enum import Enum, auto
 from typing import Optional
 import numpy as np
 
+'''
+Separation of Concerns
+
+- `RobotState` = raw sensor data (joint positions/velocities)
+- `TaskSpaceReference` = When and how to track it). A time-stamped reference that wraps CartesianTarget with mode and validity
+- `CartesianTarget` = where to go (EE pose). A pure spatial goal (pose, frame, tolerances)
+- `JointCommand` = what to send to hardware
+- Each has a single, clear responsibility
+
+Planner creats CartesianTarget -> Planner wraps it in TaskSpaceReference 
+'''
+
 @dataclass(frozen=True)
 class TimeStamp:
     t: float  # seconds, monotonic
