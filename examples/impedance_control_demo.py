@@ -142,6 +142,323 @@ class ImpedanceController:
         return tau
 
 
+class SingleJointStepTorqueTest:
+    """
+    Single-joint step torque test for robot manipulators.
+    
+    Applies a step torque to each joint individually and records the response.
+    This is useful for characterizing joint dynamics, friction, and compliance.
+    
+    Test Protocol:
+        1. Start from stable home configuration
+        2. For each joint:
+           a. Apply constant external torque for specified duration
+           b. Record position and velocity response
+           c. Allow settling time before next joint
+        3. Generate comparison plots
+    """
+    
+    def __init__(
+        self,
+        xml_path: str,
+        ext_torque: float = 1.5,
+        step_duration: float = 0.5,
+        settling_time: float = 1.0,
+        visualize: bool = True,
+        control_freq: float = 1000.0,
+    ):
+        """
+        Initialize single-joint step torque test.
+        
+        Args:
+            xml_path: Path to MuJoCo XML model
+            ext_torque: External torque to apply (N⋅m)
+            step_duration: Duration of torque application (seconds)
+            settling_time: Time to wait between joint tests (seconds)
+            visualize: Enable MuJoCo visualization
+            control_freq: Control loop frequency (Hz)
+        """
+        self.ext_torque = ext_torque
+        self.step_duration = step_duration
+        self.settling_time = settling_time
+        self.visualize = visualize
+        self.control_freq = control_freq
+        self.dt = 1.0 / control_freq
+        
+        # Load MuJoCo model
+        print(f"\nLoading MuJoCo model from: {xml_path}")
+        if not Path(xml_path).exists():
+            raise FileNotFoundError(f"MuJoCo model not found: {xml_path}")
+        
+        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        self.data = mujoco.MjData(self.model)
+        
+        # Number of joints to test (exclude gripper - last actuator)
+        self.n_joints = min(7, self.model.nu)  # FR3 has 7 arm joints
+        
+        print(f"✓ Model loaded: {self.model.nq} DOF total")
+        print(f"✓ Joints to test: {self.n_joints}")
+        
+        # Set initial configuration (home pose)
+        self.q_home = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04])
+        
+        # Initialize simulation state
+        self.data.qpos[:self.model.nu] = self.q_home
+        mujoco.mj_forward(self.model, self.data)
+        
+        # Setup data storage for all joints
+        self.test_results = {}
+        
+        # Setup visualization
+        self.visualizer = None
+        if visualize:
+            camera_config = {
+                'distance': 2.0,
+                'elevation': -20,
+                'azimuth': 135,
+                'lookat': [0.3, 0.0, 0.4]
+            }
+            self.visualizer = MuJoCoVisualizer(self.model, self.data, camera_config)
+            if self.visualizer.initialize():
+                print("✓ MuJoCo visualizer initialized")
+            else:
+                print("⚠ Visualization failed to initialize")
+                self.visualizer = None
+        
+        print(f"\nStep Torque Test Configuration:")
+        print(f"  External torque: {ext_torque} N⋅m")
+        print(f"  Step duration: {step_duration} s")
+        print(f"  Settling time: {settling_time} s")
+        print(f"  Control frequency: {control_freq} Hz")
+    
+    def _reset_to_home(self):
+        """Reset robot to home configuration with settling."""
+        # Apply PD control to return to home
+        kp = 100.0
+        kd = 20.0
+        settle_steps = int(self.settling_time / self.dt)
+        
+        for _ in range(settle_steps):
+            q = self.data.qpos[:self.model.nu].copy()
+            dq = self.data.qvel[:self.model.nu].copy()
+            
+            # PD control to home
+            tau = kp * (self.q_home[:self.model.nu] - q) - kd * dq
+            self.data.ctrl[:] = tau
+            
+            mujoco.mj_step(self.model, self.data)
+            
+            if self.visualizer is not None:
+                self.visualizer.update()
+                if not self.visualizer.is_running():
+                    return False
+            
+            time.sleep(self.dt * 0.1)  # Slow down for visualization
+        
+        return True
+    
+    def _run_single_joint_test(self, joint_idx: int) -> dict:
+        """
+        Run step torque test on a single joint.
+        
+        Args:
+            joint_idx: Index of joint to test (0-based)
+        
+        Returns:
+            Dictionary with test results for this joint
+        """
+        num_steps = int(self.step_duration / self.dt)
+        
+        # Data arrays
+        time_data = np.zeros(num_steps)
+        q_data = np.zeros((num_steps, self.model.nu))
+        dq_data = np.zeros((num_steps, self.model.nu))
+        tau_data = np.zeros((num_steps, self.model.nu))
+        
+        print(f"\n  Applying {self.ext_torque} N⋅m to Joint {joint_idx + 1} for {self.step_duration}s...")
+        
+        for step in range(num_steps):
+            t = step * self.dt
+            
+            # Get current state
+            q = self.data.qpos[:self.model.nu].copy()
+            dq = self.data.qvel[:self.model.nu].copy()
+            
+            # Apply step torque only to the target joint
+            tau = np.zeros(self.model.nu)
+            tau[joint_idx] = self.ext_torque
+            
+            # Apply control
+            self.data.ctrl[:] = tau
+            
+            # Step simulation
+            mujoco.mj_step(self.model, self.data)
+            
+            # Log data
+            time_data[step] = t
+            q_data[step] = q
+            dq_data[step] = dq
+            tau_data[step] = tau
+            
+            # Update visualization
+            if self.visualizer is not None:
+                self.visualizer.update()
+                if not self.visualizer.is_running():
+                    break
+            
+            time.sleep(self.dt * 0.1)  # Slow down for visualization
+        
+        # Calculate response metrics
+        q_initial = q_data[0, joint_idx]
+        q_final = q_data[-1, joint_idx]
+        delta_q = q_final - q_initial
+        max_velocity = np.max(np.abs(dq_data[:, joint_idx]))
+        
+        print(f"    Position change: {np.degrees(delta_q):.2f}° ({delta_q:.4f} rad)")
+        print(f"    Max velocity: {max_velocity:.4f} rad/s")
+        
+        return {
+            'joint_idx': joint_idx,
+            'time': time_data,
+            'q': q_data,
+            'dq': dq_data,
+            'tau': tau_data,
+            'delta_q': delta_q,
+            'max_velocity': max_velocity,
+        }
+    
+    def run(self) -> dict:
+        """
+        Run step torque test on all joints sequentially.
+        
+        Returns:
+            Dictionary containing test results for all joints
+        """
+        print(f"\n{'='*70}")
+        print(f"Single-Joint Step Torque Test")
+        print(f"{'='*70}")
+        print(f"Testing {self.n_joints} joints with {self.ext_torque} N⋅m step torque")
+        print(f"Duration per joint: {self.step_duration}s")
+        if self.visualize:
+            print("Press Ctrl+C or close viewer window to stop")
+        print(f"{'='*70}")
+        
+        try:
+            for joint_idx in range(self.n_joints):
+                print(f"\n[Joint {joint_idx + 1}/{self.n_joints}]")
+                
+                # Reset to home position
+                print(f"  Idle ...")
+                if not self._reset_to_home():
+                    print("  Viewer closed, stopping test")
+                    break
+                
+                # Run test on this joint
+                result = self._run_single_joint_test(joint_idx)
+                self.test_results[joint_idx] = result
+                
+                # Check if viewer is still open
+                if self.visualizer is not None and not self.visualizer.is_running():
+                    print("  Viewer closed, stopping test")
+                    break
+            
+            # Final reset
+            print(f"\n  Final reset to home position...")
+            self._reset_to_home()
+        
+        except KeyboardInterrupt:
+            print("\n\nTest interrupted by user")
+        
+        finally:
+            # Summary
+            print(f"\n{'='*70}")
+            print("Step Torque Test Summary")
+            print(f"{'='*70}")
+            print(f"{'Joint':<10} {'Δ Position (°)':<18} {'Δ Position (rad)':<18} {'Max Vel (rad/s)':<15}")
+            print("-" * 70)
+            
+            for joint_idx, result in self.test_results.items():
+                delta_deg = np.degrees(result['delta_q'])
+                delta_rad = result['delta_q']
+                max_vel = result['max_velocity']
+                print(f"Joint {joint_idx + 1:<4} {delta_deg:<18.3f} {delta_rad:<18.4f} {max_vel:<15.4f}")
+            
+            print(f"{'='*70}\n")
+            
+            # Cleanup visualization
+            if self.visualizer is not None:
+                self.visualizer.shutdown()
+        
+        return self.test_results
+    
+    def plot_results(self, save_path: Optional[str] = None):
+        """
+        Plot step torque test results for all joints.
+        
+        Args:
+            save_path: Optional path to save figure
+        """
+        if not self.test_results:
+            print("No test results to plot")
+            return
+        
+        n_tested = len(self.test_results)
+        fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+        fig.suptitle(f'Single-Joint Step Torque Test Results\n'
+                     f'(Torque: {self.ext_torque} N⋅m, Duration: {self.step_duration}s)',
+                     fontsize=14, fontweight='bold')
+        
+        colors = plt.cm.tab10(np.linspace(0, 1, n_tested))
+        
+        # Plot 1: Position change (relative to initial)
+        ax1 = axes[0]
+        for i, (joint_idx, result) in enumerate(self.test_results.items()):
+            time = result['time']
+            q = result['q'][:, joint_idx]
+            q_rel = q - q[0]  # Relative to initial position
+            ax1.plot(time, np.degrees(q_rel), label=f'Joint {joint_idx + 1}', 
+                     color=colors[i], linewidth=2)
+        ax1.set_ylabel('Position Change (°)', fontsize=12, fontweight='bold')
+        ax1.set_title('Joint Position Response to Step Torque', fontsize=13, fontweight='bold')
+        ax1.legend(loc='upper left', fontsize=10)
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        
+        # Plot 2: Velocity response
+        ax2 = axes[1]
+        for i, (joint_idx, result) in enumerate(self.test_results.items()):
+            time = result['time']
+            dq = result['dq'][:, joint_idx]
+            ax2.plot(time, dq, label=f'Joint {joint_idx + 1}', 
+                     color=colors[i], linewidth=2)
+        ax2.set_ylabel('Velocity (rad/s)', fontsize=12, fontweight='bold')
+        ax2.set_title('Joint Velocity Response to Step Torque', fontsize=13, fontweight='bold')
+        ax2.legend(loc='upper left', fontsize=10)
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+        
+        # Plot 3: Applied torque (verification)
+        ax3 = axes[2]
+        for i, (joint_idx, result) in enumerate(self.test_results.items()):
+            time = result['time']
+            tau = result['tau'][:, joint_idx]
+            ax3.plot(time, tau, label=f'Joint {joint_idx + 1}', 
+                     color=colors[i], linewidth=2)
+        ax3.set_xlabel('Time (s)', fontsize=12, fontweight='bold')
+        ax3.set_ylabel('Applied Torque (N⋅m)', fontsize=12, fontweight='bold')
+        ax3.set_title('Applied Step Torque', fontsize=13, fontweight='bold')
+        ax3.legend(loc='upper left', fontsize=10)
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"✓ Plot saved to: {save_path}")
+        
+        plt.show()
+
+
 class ImpedanceControlDemo:
     """
     Demonstration of impedance control on Franka FR3 robot in MuJoCo.
@@ -492,27 +809,72 @@ Examples:
         help='Control loop frequency in Hz (default: 1000.0)'
     )
     
+    # Step torque test arguments
+    parser.add_argument(
+        '--step-torque-test',
+        action='store_true',
+        help='Run single-joint step torque test instead of impedance demo'
+    )
+    parser.add_argument(
+        '--ext-torque',
+        type=float,
+        default=1.5,
+        help='External torque for step test (N⋅m, default: 1.5)'
+    )
+    parser.add_argument(
+        '--step-duration',
+        type=float,
+        default=0.5,
+        help='Duration of torque application per joint (seconds, default: 0.5)'
+    )
+    parser.add_argument(
+        '--settling-time',
+        type=float,
+        default=1.0,
+        help='Settling time between joint tests (seconds, default: 1.0)'
+    )
+    
     args = parser.parse_args()
     
     # Create and run demo
     try:
-        demo = ImpedanceControlDemo(
-            xml_path=args.xml,
-            duration=args.duration,
-            stiffness=args.stiffness,
-            damping=args.damping,
-            target_joints=np.array(args.target) if args.target else None,
-            visualize=args.visualize,
-            control_freq=args.control_freq,
-        )
-        
-        # Run simulation
-        data = demo.run()
-        
-        # Plot results if requested
-        if args.plot or args.save_plot:
-            print("\nGenerating plots...")
-            demo.plot_results(data, save_path=args.save_plot)
+        if args.step_torque_test:
+            # Run single-joint step torque test
+            test = SingleJointStepTorqueTest(
+                xml_path=args.xml,
+                ext_torque=args.ext_torque,
+                step_duration=args.step_duration,
+                settling_time=args.settling_time,
+                visualize=args.visualize,
+                control_freq=args.control_freq,
+            )
+            
+            # Run test
+            test.run()
+            
+            # Plot results if requested
+            if args.plot or args.save_plot:
+                print("\nGenerating plots...")
+                test.plot_results(save_path=args.save_plot)
+        else:
+            # Run impedance control demo
+            demo = ImpedanceControlDemo(
+                xml_path=args.xml,
+                duration=args.duration,
+                stiffness=args.stiffness,
+                damping=args.damping,
+                target_joints=np.array(args.target) if args.target else None,
+                visualize=args.visualize,
+                control_freq=args.control_freq,
+            )
+            
+            # Run simulation
+            data = demo.run()
+            
+            # Plot results if requested
+            if args.plot or args.save_plot:
+                print("\nGenerating plots...")
+                demo.plot_results(data, save_path=args.save_plot)
     
     except Exception as e:
         print(f"\n❌ Error: {e}")
