@@ -213,15 +213,16 @@ class MuJoCoSimulatorService(Node):
         try:
             # Apply effort commands to actuators
             if len(request.effort_commands) != self.model.nu:
-                self.get_logger().warn(
-                    f"Effort command size mismatch: got {len(request.effort_commands)}, "
-                    f"expected {self.model.nu}"
-                )
-            
-            # Set control inputs
-            num_commands = min(len(request.effort_commands), self.model.nu)
-            for i in range(num_commands):
-                self.data.ctrl[i] = request.effort_commands[i]
+                # Pad with zeros for missing actuators (e.g., gripper)
+                if len(request.effort_commands) < self.model.nu:
+                    padded_commands = list(request.effort_commands) + [0.0] * (self.model.nu - len(request.effort_commands))
+                    self.data.ctrl[:] = padded_commands
+                else:
+                    # Truncate if too many commands
+                    self.data.ctrl[:] = request.effort_commands[:self.model.nu]
+            else:
+                # Perfect match - use commands directly
+                self.data.ctrl[:] = request.effort_commands
             
             # Step simulation
             mujoco.mj_step(self.model, self.data)
