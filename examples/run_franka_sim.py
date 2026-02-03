@@ -57,93 +57,8 @@ from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
 from avant_robot_interface.core.simple_control_loop import BaseMultiRateControlLoop
 from avant_robot_interface.core.controllers import MinkIKController
+from avant_robot_interface.core.planners import CircularTrajectoryPlanner
 from avant_robot_interface.visualization.mujoco.mujuco_viewer import MuJoCoVisualizer
-
-
-class MinkPlanner:
-    """
-    Task-space trajectory planner using circular trajectory.
-
-    Generates CartesianTarget references at planner rate (~20 Hz).
-    Simulates planner dropout after alive_s seconds if specified.
-    """
-
-    def __init__(
-        self,
-        initial_position: np.ndarray,
-        initial_orientation: np.ndarray,
-        horizon_s: float,
-        ee_link: str,
-        pos_tol_m: float,
-        rot_tol_rad: float,
-        amplitude: float = 0.10,
-        frequency: float = 0.2,
-        alive_s: Optional[float] = None,
-    ):
-        """
-        Args:
-            initial_position: Starting XYZ position for trajectory center
-            initial_orientation: Starting quaternion (x,y,z,w) for orientation
-            horizon_s: Reference validity horizon (seconds)
-            ee_link: End-effector link name
-            pos_tol_m: Position tolerance for Cartesian target
-            rot_tol_rad: Rotation tolerance for Cartesian target
-            amplitude: Radius of circular trajectory (meters)
-            frequency: Frequency of circular motion (Hz)
-            alive_s: Planner lifetime before dropout (None = run forever)
-        """
-        self.initial_position = initial_position
-        self.initial_orientation = initial_orientation
-        self.horizon_s = horizon_s
-        self.ee_link = ee_link
-        self.pos_tol_m = pos_tol_m
-        self.rot_tol_rad = rot_tol_rad
-        self.amplitude = amplitude
-        self.frequency = frequency
-        self.alive_s = alive_s
-        self.t0 = time.monotonic()
-        
-    def update(self, state: RobotState) -> Optional[TaskSpaceReference]:
-        """Generate task-space reference at planner rate."""
-        now = time.monotonic()
-        elapsed = now - self.t0
-        
-        # Simulate planner dropout if configured
-        if self.alive_s is not None and elapsed > self.alive_s:
-            print(f"[PLANNER] Simulating dropout at t={elapsed:.2f}s")
-            return None
-        
-        # Compute circular trajectory offset in XY plane
-        offset = np.array([
-            self.amplitude * np.cos(2 * np.pi * self.frequency * elapsed),
-            self.amplitude * np.sin(2 * np.pi * self.frequency * elapsed),
-            0.0,
-        ])
-        
-        # Create target pose
-        target_position = self.initial_position + offset
-        target_SE3 = SE3(
-            p=target_position,
-            q=self.initial_orientation,
-        )
-        
-        # Create Cartesian target
-        target = CartesianTarget(
-            link_name=self.ee_link,
-            in_frame=Frame.WORLD,
-            T=target_SE3,
-            v=None,
-            weight=1.0,
-            pos_tol_m=self.pos_tol_m,
-            rot_tol_rad=self.rot_tol_rad,
-        )
-        
-        return TaskSpaceReference(
-            stamp=TimeStamp(now),
-            horizon_s=self.horizon_s,
-            mode=RefMode.TRACK,
-            target=target,
-        )
 
 
 class CrispRobotInterface:
@@ -311,11 +226,11 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
         self.controller.initialize_posture_target()
 
         # 4. Create planner
-        self.planner = MinkPlanner(
+        self.planner = CircularTrajectoryPlanner(
             initial_position=initial_position,
             initial_orientation=initial_orientation,
-            horizon_s=config.horizon_s,
             ee_link=config.ee_link,
+            horizon_s=config.horizon_s,
             pos_tol_m=config.pos_tol_m,
             rot_tol_rad=config.rot_tol_rad,
             amplitude=0.10,  # 10cm radius

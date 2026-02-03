@@ -59,38 +59,8 @@ from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
 from avant_robot_interface.core.simple_control_loop import BaseMultiRateControlLoop
 from avant_robot_interface.core.controllers import MinkIKController
+from avant_robot_interface.core.planners import HoldPlanner
 from avant_robot_interface.visualization.mujoco.mujuco_viewer import MuJoCoVisualizer
-
-
-class HoldPlanner:
-    """
-    Simple hold planner that keeps robot in HOLD mode.
-    
-    Does not generate trajectories - waits for external ROS2 commands.
-    This allows the robot to stay at its current position until
-    keyboard teleop commands arrive.
-    """
-
-    def __init__(self, ee_link: str, horizon_s: float):
-        """
-        Args:
-            ee_link: End-effector link name (for compatibility)
-            horizon_s: Reference validity horizon (for compatibility)
-        """
-        self.ee_link = ee_link
-        self.horizon_s = horizon_s
-        self.first_call = True
-        
-    def update(self, state: RobotState) -> Optional[TaskSpaceReference]:
-        """
-        Always returns None to keep robot in HOLD mode.
-        
-        The Bridge will detect no reference and keep robot at current position.
-        """
-        if self.first_call:
-            print("[HOLD PLANNER] Robot in HOLD mode - waiting for ROS2 teleop commands...")
-            self.first_call = False
-        return None
 
 
 class CrispRobotInterface:
