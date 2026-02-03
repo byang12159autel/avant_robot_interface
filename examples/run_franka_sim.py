@@ -46,8 +46,6 @@ import numpy as np
 from loop_rate_limiters import RateLimiter
 from scipy.spatial.transform import Rotation
 
-import mink
-
 from crisp_py.robot import make_robot
 
 from avant_robot_interface.core.contracts import (
@@ -58,6 +56,7 @@ from avant_robot_interface.core.bridge import Bridge
 from avant_robot_interface.core.ports import TaskPlanner, PositionController
 from avant_robot_interface.core.config import load_config
 from avant_robot_interface.core.simple_control_loop import BaseMultiRateControlLoop
+from avant_robot_interface.core.controllers import MinkIKController
 from avant_robot_interface.visualization.mujoco.mujuco_viewer import MuJoCoVisualizer
 
 
@@ -145,150 +144,6 @@ class MinkPlanner:
             mode=RefMode.TRACK,
             target=target,
         )
-
-
-class MinkIKController:
-    """
-    Position controller using mink IK solver.
-
-    Receives TaskSpaceReference from Bridge and solves IK to compute
-    joint positions. Handles HOLD and TRACK modes.
-    """
-
-    def __init__(
-        self,
-        mujoco_model: mujoco.MjModel,
-        control_dt: float,
-        ee_link: str,
-        ik_solver: str,
-        pos_threshold: float,
-        ori_threshold: float,
-        max_iters: int,
-        ee_position_cost: float,
-        ee_orientation_cost: float,
-        ee_lm_damping: float,
-        posture_cost: float,
-        damping: float,
-    ):
-        """
-        Args:
-            mujoco_model: MuJoCo model for kinematics
-            control_dt: Controller timestep for IK integration
-            ee_link: End-effector link name
-            ik_solver: IK solver name
-            pos_threshold: Position convergence threshold
-            ori_threshold: Orientation convergence threshold
-            max_iters: Maximum IK iterations
-            ee_position_cost: End-effector position task cost
-            ee_orientation_cost: End-effector orientation task cost
-            ee_lm_damping: End-effector Levenberg-Marquardt damping
-            posture_cost: Posture task cost
-            damping: IK damping
-        """
-        self.model = mujoco_model
-        self.dt = control_dt
-        self.ik_solver = ik_solver
-        self.pos_threshold = pos_threshold
-        self.ori_threshold = ori_threshold
-        self.max_iters = max_iters
-        self.damping = damping
-        self.configuration = mink.Configuration(mujoco_model)
-
-        # Create IK tasks
-        self.end_effector_task = mink.FrameTask(
-            frame_name=ee_link,
-            frame_type="site",
-            position_cost=ee_position_cost,
-            orientation_cost=ee_orientation_cost,
-            lm_damping=ee_lm_damping,
-        )
-        self.posture_task = mink.PostureTask(model=mujoco_model, cost=np.full(mujoco_model.nq, posture_cost))
-        self.tasks = [self.end_effector_task, self.posture_task]
-
-        # Current reference
-        self.current_ref: Optional[TaskSpaceReference] = None
-        
-    def set_reference(self, ref: TaskSpaceReference) -> None:
-        """Update the task-space reference from Bridge."""
-        self.current_ref = ref
-        
-    def step(self, state: RobotState) -> JointCommand:
-        """
-        Compute joint command based on current reference.
-        
-        Args:
-            state: Current robot state (joint positions, velocities)
-            
-        Returns:
-            JointCommand with desired joint positions
-        """
-        # Update mink configuration from actual robot state
-        q_padded = self._pad_joints(state.q, self.model.nq)
-        self.configuration.update(q_padded)
-        
-        if self.current_ref is None or self.current_ref.mode == RefMode.HOLD:
-            # HOLD mode: command current position
-            q_des = state.q[:7].copy()
-        else:
-            # TRACK mode: solve IK for target pose
-            target = self.current_ref.target
-            if target is not None:
-                # Convert to mink SE3
-                target_SE3 = mink.SE3.from_rotation_and_translation(
-                    mink.SO3(np.array([target.T.q[3], target.T.q[0], target.T.q[1], target.T.q[2]])),
-                    target.T.p
-                )
-                
-                # Set IK target
-                self.end_effector_task.set_target(target_SE3)
-                
-                # Solve IK
-                self._converge_ik()
-                
-                # Extract joint positions (first 7 DOF for FR3)
-                q_des = self.configuration.q[:7].copy()
-            else:
-                # No target in TRACK mode -> fallback to HOLD
-                q_des = state.q[:7].copy()
-        
-        return JointCommand(
-            stamp=state.stamp,
-            q_des=q_des,
-            dq_des=None,
-            tau_ff=None,
-        )
-    
-    def _converge_ik(self):
-        """Run IK iterations until convergence or max iterations."""
-        for _ in range(self.max_iters):
-            vel = mink.solve_ik(
-                self.configuration,
-                self.tasks,
-                self.dt,
-                self.ik_solver,
-                damping=self.damping
-            )
-            self.configuration.integrate_inplace(vel, self.dt)
-
-            # Check convergence
-            err = self.end_effector_task.compute_error(self.configuration)
-            pos_achieved = np.linalg.norm(err[:3]) <= self.pos_threshold
-            ori_achieved = np.linalg.norm(err[3:]) <= self.ori_threshold
-
-            if pos_achieved and ori_achieved:
-                break
-    
-    def _pad_joints(self, joint_array: np.ndarray, target_size: int) -> np.ndarray:
-        """Pad joint array to target size with zeros (for gripper DOF)."""
-        if len(joint_array) < target_size:
-            padded = np.zeros(target_size)
-            padded[:len(joint_array)] = joint_array
-            return padded
-        return joint_array[:target_size]
-    
-    def initialize_posture_target(self):
-        """Set posture task target to current configuration."""
-        self.posture_task.set_target_from_configuration(self.configuration)
 
 
 class CrispRobotInterface:
@@ -452,9 +307,7 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
         )
 
         # Initialize mink configuration and posture target
-        q_padded = np.zeros(self.model.nq)
-        q_padded[:len(initial_state.q)] = initial_state.q
-        self.controller.configuration.update(q_padded)
+        self.controller.update_configuration(initial_state.q)
         self.controller.initialize_posture_target()
 
         # 4. Create planner
@@ -486,7 +339,8 @@ class FrankaMultiRateControlLoop(BaseMultiRateControlLoop):
             
             # Create MuJoCo data structure for visualization
             self.mujoco_data = mujoco.MjData(self.model)
-            self.mujoco_data.qpos[:len(q_padded)] = q_padded
+            q_viz = self.controller.get_configuration_q()
+            self.mujoco_data.qpos[:len(q_viz)] = q_viz
             mujoco.mj_forward(self.model, self.mujoco_data)
             
             # Camera configuration for FR3
